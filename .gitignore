@@ -1,0 +1,16 @@
+.venv/
+.dev/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+decky-plugin/node_modules/
+.DS_Store
+*.log
+*.tar.gz

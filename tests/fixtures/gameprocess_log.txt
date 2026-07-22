@@ -1,0 +1,4 @@
+[2026-07-20 10:00:00] AppID 3405690 adding PID 100 as a tracked process
+[2026-07-20 10:00:01] AppID 3405690 adding PID 101 as a tracked process
+[2026-07-20 10:30:00] AppID 3405690 no longer tracking PID 101, exit code 0
+[2026-07-20 10:30:01] Remove 3405690 from running list

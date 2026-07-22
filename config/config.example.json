@@ -1,0 +1,58 @@
+{
+  "schema_version": 2,
+  "language": "en",
+  "daily_limits": {
+    "enabled": true,
+    "reset_at": "00:00",
+    "timezone": "system",
+    "weekly": {
+      "monday": { "minutes": 120, "unlimited": false },
+      "tuesday": { "minutes": 120, "unlimited": false },
+      "wednesday": { "minutes": 120, "unlimited": false },
+      "thursday": { "minutes": 120, "unlimited": false },
+      "friday": { "minutes": 120, "unlimited": false },
+      "saturday": { "minutes": 120, "unlimited": false },
+      "sunday": { "minutes": 120, "unlimited": false }
+    },
+    "allowed_periods": []
+  },
+  "warnings": {
+    "threshold_minutes": [30, 15, 5, 1],
+    "notify_at_exhaustion": true,
+    "native_desktop_notifications": true
+  },
+  "timer": {
+    "count_only_while_playing": true,
+    "default_minutes": 30,
+    "default_action": "inherit"
+  },
+  "restriction": {
+    "level": 0,
+    "grace_seconds": 60,
+    "close_timeout_seconds": 20,
+    "force_kill_enabled": false,
+    "launch_grace_seconds": 5,
+    "safe_process_fallback": true
+  },
+  "detector": {
+    "mode": "auto",
+    "steam_log_path": "auto",
+    "procfs_fallback_interval_seconds": 15,
+    "decky_signal_ttl_seconds": 20,
+    "ignored_app_ids": ["769"],
+    "ignored_names": ["Steam", "gamescope", "steamwebhelper"]
+  },
+  "history": {
+    "retention_days": 90,
+    "checkpoint_seconds": 30,
+    "backup_count": 3
+  },
+  "logging": {
+    "level": "INFO",
+    "max_bytes": 2000000,
+    "backup_count": 3
+  },
+  "simulation": {
+    "enabled": false
+  }
+}

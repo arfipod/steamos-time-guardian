@@ -1,0 +1,11 @@
+{
+  "name": "SteamOS Time Guardian",
+  "author": "SteamOS Time Guardian contributors",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["utility", "timer", "parental-controls", "time-management"],
+    "description": "Local play-time tracking, timers, limits, and safe restrictions for SteamOS.",
+    "image": ""
+  }
+}

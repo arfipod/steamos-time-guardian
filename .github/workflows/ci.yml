@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-build-isolation --editable '.[dev]'
+          npm install --global typescript@5.8.3
+      - name: Format check
+        run: ./scripts/format.sh --check
+      - name: Lint and type check
+        run: ./scripts/lint.sh
+      - name: Unit and integration tests with coverage
+        run: ./scripts/test.sh --coverage
+      - name: Build
+        run: ./scripts/build.sh
+      - name: Simulation smoke test
+        run: ./scripts/smoke-test.sh
+      - name: Package and verify archives
+        run: ./scripts/package.sh --skip-tests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steamos-time-guardian-ci-packages
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7

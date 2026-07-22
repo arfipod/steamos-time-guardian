@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "steamos-time-guardian"
+version = "0.1.0"
+description = "Local, low-overhead play-time tracking and safe restriction service for SteamOS"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "SteamOS Time Guardian contributors" }]
+keywords = ["steamos", "steam-deck", "time-management", "decky", "linux"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Environment :: X11 Applications :: KDE",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Typing :: Typed"
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "coverage[toml]==7.10.6",
+  "mypy==1.18.2",
+  "pytest==8.4.2",
+  "pytest-cov==7.0.0",
+  "ruff==0.13.2"
+]
+
+[project.scripts]
+steamos-time-guardian = "stg.cli:main"
+stg = "stg.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "daemon/src" }
+
+[tool.setuptools.packages.find]
+where = ["daemon/src"]
+include = ["stg*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+exclude = ["decky-plugin/dist", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "daemon/src"
+exclude = ["decky-plugin", "build", "dist"]
+warn_unused_ignores = true
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+pythonpath = ["daemon/src", "."]
+
+[tool.coverage.run]
+branch = true
+source = ["stg"]
+omit = ["daemon/src/stg/tui.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 60

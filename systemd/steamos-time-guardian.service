@@ -1,0 +1,27 @@
+[Unit]
+Description=SteamOS Time Guardian user service
+Documentation=file:%h/.local/lib/steamos-time-guardian/docs/installation.md
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/steamos-time-guardian daemon --no-foreground-log
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/steamos-time-guardian %h/.local/share/steamos-time-guardian %h/.local/state/steamos-time-guardian %t/steamos-time-guardian
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RuntimeDirectory=steamos-time-guardian
+RuntimeDirectoryMode=0700
+RestrictAddressFamilies=AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=default.target

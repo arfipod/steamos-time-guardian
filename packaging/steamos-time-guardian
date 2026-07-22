@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+readonly LIB_DIR="@LIB_DIR@"
+export PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m stg "$@"
