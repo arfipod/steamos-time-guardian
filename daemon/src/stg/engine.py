@@ -7,11 +7,12 @@ All mutating calls are serialized by the service layer, making it straightforwar
 from __future__ import annotations
 
 import copy
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from uuid import uuid4
 
 from .clock import Clock
+from .i18n import language, tr
 from .models import DomainEvent, GameIdentity, RestrictionReason, TimerSnapshot, TimerState
 from .schedule import (
     accounting_day,
@@ -19,6 +20,7 @@ from .schedule import (
     accounting_day_start,
     limit_for_day,
     local_datetime,
+    resolve_timezone,
     seconds_until_reset,
     within_allowed_period,
 )
@@ -31,6 +33,7 @@ _TIMER_ACTION_LEVEL = {
     "close": 2,
     "block": 3,
 }
+_USAGE_BUCKET_HOURS = 4
 
 
 class DomainError(ValueError):
@@ -57,6 +60,8 @@ class GuardianEngine:
         self._last_checkpoint_mono = self._last_tick_mono
         self._last_timer_persist_mono = self._last_tick_mono
         self._last_offset_seconds = self._utc_offset(now)
+        self._usage_bucket_timezone = resolve_timezone(self.config["daily_limits"]["timezone"])
+        self._pending_usage_buckets: dict[tuple[str, int, str, str | None, str], float] = {}
         self._initial_events: list[DomainEvent] = []
         recovered = self.storage.recover_open_session(now)
         if recovered:
@@ -87,6 +92,7 @@ class GuardianEngine:
     def update_config(self, config: dict[str, Any]) -> list[DomainEvent]:
         events = self.tick()
         self.config = copy.deepcopy(config)
+        self._usage_bucket_timezone = resolve_timezone(self.config["daily_limits"]["timezone"])
         now = self.clock.now_utc()
         new_day_key = self._day_key(now)
         if new_day_key != self.day_key:
@@ -101,6 +107,12 @@ class GuardianEngine:
         mono_delta = max(0.0, mono - self._last_tick_mono)
         wall_delta = (now - self._last_tick_wall).total_seconds()
         discrepancy = wall_delta - mono_delta
+        heatmap_attribution_is_reliable = (
+            not self.suspended
+            and mono_delta > 0
+            and wall_delta > 0
+            and abs(discrepancy) <= 5
+        )
         events: list[DomainEvent] = []
 
         if discrepancy > 30:
@@ -149,12 +161,25 @@ class GuardianEngine:
 
         # CLOCK_MONOTONIC excludes suspend on Linux, so only active elapsed time is counted.
         if not self.suspended:
-            self._account_game_elapsed(split_before)
+            self._account_game_elapsed(
+                split_before,
+                interval_start=self._last_tick_wall,
+                interval_end=boundary if new_day_key != self.day_key else now,
+                record_usage_bucket=heatmap_attribution_is_reliable,
+            )
 
         if new_day_key != self.day_key:
             events.extend(self._roll_day(boundary, new_day_key))
             if not self.suspended:
-                self._account_game_elapsed(split_after)
+                self._account_game_elapsed(
+                    split_after,
+                    interval_start=boundary,
+                    interval_end=now,
+                    record_usage_bucket=heatmap_attribution_is_reliable,
+                )
+                # _roll_day resets the session checkpoint baseline for the new session. Flush
+                # its initial slice now so it cannot remain pending until the next checkpoint.
+                self._flush_usage_buckets()
 
         if (
             self.timer.state == TimerState.RUNNING
@@ -171,6 +196,7 @@ class GuardianEngine:
         checkpoint_seconds = self.config["history"]["checkpoint_seconds"]
         if self.session_id and mono - self._last_checkpoint_mono >= checkpoint_seconds:
             self.storage.checkpoint_session(self.session_id, self.session_duration, now)
+            self._flush_usage_buckets()
             self._last_checkpoint_mono = mono
         if self.timer.state == TimerState.RUNNING and mono - self._last_timer_persist_mono >= checkpoint_seconds:
             self.timer.updated_at = utc_iso(now)
@@ -431,14 +457,20 @@ class GuardianEngine:
                 newly_marked.append(threshold)
         if newly_marked:
             threshold = min(newly_marked)
+            selected_language = language(self.config.get("language"))
             if threshold == 0:
-                title = "Play time exhausted"
-                body = "The configured play-time allowance has been used."
+                title = tr(selected_language, "warning_exhausted_title")
+                body = tr(selected_language, f"warning_exhausted_{scope}")
                 urgency = "critical"
             else:
                 minutes = max(1, threshold // 60)
-                title = f"{minutes} minute{'s' if minutes != 1 else ''} remaining"
-                body = f"{scope.capitalize()} allowance is nearing its limit."
+                title = tr(
+                    selected_language,
+                    "warning_remaining_title",
+                    minutes=minutes,
+                    unit=tr(selected_language, "minute_one" if minutes == 1 else "minute_many"),
+                )
+                body = tr(selected_language, f"warning_remaining_{scope}")
                 urgency = "normal" if minutes > 5 else "critical"
             payload = {
                 "scope": scope,
@@ -500,6 +532,7 @@ class GuardianEngine:
         old_day = self.day_key
         events: list[DomainEvent] = []
         if self.current_game and self.session_id:
+            self._flush_usage_buckets()
             self.storage.close_session(self.session_id, self.session_duration, now, "daily_reset")
             events.append(
                 self._event(
@@ -543,6 +576,7 @@ class GuardianEngine:
         game = self.current_game
         session_id = self.session_id
         duration = self.session_duration
+        self._flush_usage_buckets()
         self.storage.close_session(session_id, duration, now, reason)
         self.current_game = None
         self.session_id = None
@@ -624,10 +658,108 @@ class GuardianEngine:
         offset = local.utcoffset()
         return int(offset.total_seconds()) if offset else 0
 
-    def _account_game_elapsed(self, seconds: float) -> None:
+    def _account_game_elapsed(
+        self,
+        seconds: float,
+        *,
+        interval_start: datetime | None = None,
+        interval_end: datetime | None = None,
+        record_usage_bucket: bool = False,
+    ) -> None:
         if self.current_game and seconds > 0:
             self.played_today += seconds
             self.session_duration += seconds
+            if record_usage_bucket and interval_start and interval_end:
+                self._queue_usage_buckets(self.current_game, self.day_key, interval_start, interval_end, seconds)
+
+    def _queue_usage_buckets(
+        self,
+        game: GameIdentity,
+        day_key: str,
+        interval_start: datetime,
+        interval_end: datetime,
+        seconds: float,
+    ) -> None:
+        """Queue a reliable active-time interval for checkpointed heatmap storage.
+
+        The wall interval is only used after ``tick()`` has established that it closely matches
+        monotonic elapsed time. On suspend or a material wall-clock jump the interval is omitted
+        rather than assigning play time to hours the user may not have been playing.
+        """
+        if interval_end <= interval_start or seconds <= 0:
+            return
+        wall_seconds = (interval_end - interval_start).total_seconds()
+        if wall_seconds <= 0:
+            return
+        cursor = interval_start.astimezone(UTC)
+        end = interval_end.astimezone(UTC)
+        remaining = float(seconds)
+        app_key = (
+            f"app:{game.app_id}"
+            if game.app_id and game.app_id != "0"
+            else f"name:{game.name.casefold()}"
+        )
+        while cursor < end and remaining > 0:
+            boundary = self._next_usage_bucket_boundary(cursor)
+            segment_end = min(boundary, end)
+            segment_wall_seconds = (segment_end - cursor).total_seconds()
+            if segment_wall_seconds <= 0:
+                break
+            if segment_end == end:
+                allocated = remaining
+            else:
+                allocated = seconds * segment_wall_seconds / wall_seconds
+                remaining = max(0.0, remaining - allocated)
+            local = cursor.astimezone(self._usage_bucket_timezone)
+            bucket_index = local.hour // _USAGE_BUCKET_HOURS
+            key = (day_key, bucket_index, app_key, game.app_id, game.name)
+            self._pending_usage_buckets[key] = self._pending_usage_buckets.get(key, 0.0) + allocated
+            cursor = segment_end
+
+    def _next_usage_bucket_boundary(self, value: datetime) -> datetime:
+        local = value.astimezone(self._usage_bucket_timezone)
+        bucket_index = local.hour // _USAGE_BUCKET_HOURS
+        target_day = local.date()
+        target_hour = (bucket_index + 1) * _USAGE_BUCKET_HOURS
+        if target_hour >= 24:
+            target_day += timedelta(days=1)
+            target_hour = 0
+        candidate = datetime.combine(
+            target_day,
+            time(target_hour),
+            tzinfo=self._usage_bucket_timezone,
+        ).astimezone(UTC)
+        if candidate > value:
+            return candidate
+
+        # An unusual DST transition can make a local clock target ambiguous. Find the next
+        # actual UTC minute where the local day/block changes; this path is rare and bounded.
+        current_block = (local.date(), bucket_index)
+        probe = value.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        for _ in range(_USAGE_BUCKET_HOURS * 60 + 2):
+            probe_local = probe.astimezone(self._usage_bucket_timezone)
+            if (probe_local.date(), probe_local.hour // _USAGE_BUCKET_HOURS) != current_block:
+                return probe
+            probe += timedelta(minutes=1)
+        return value + timedelta(seconds=1)
+
+    def _flush_usage_buckets(self) -> None:
+        if not self._pending_usage_buckets:
+            return
+        entries = [
+            {
+                "day_key": day_key,
+                "bucket_index": bucket_index,
+                "app_key": app_key,
+                "app_id": app_id,
+                "app_name": app_name,
+                "seconds": seconds,
+            }
+            for (day_key, bucket_index, app_key, app_id, app_name), seconds
+            in self._pending_usage_buckets.items()
+        ]
+        self.storage.add_usage_buckets(entries)
+        self._pending_usage_buckets.clear()
 
     @staticmethod
     def _split_elapsed_at_boundary(

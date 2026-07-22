@@ -116,9 +116,25 @@ erDiagram
     text action
     text generation
   }
+  USAGE_BUCKETS {
+    text day_key PK
+    integer bucket_index PK
+    text app_key PK
+    text app_id
+    text app_name
+    real seconds
+  }
 ```
 
 On startup, an incomplete session closes with `service_restart_recovery`; the last checkpointed duration is retained rather than inventing elapsed time while the daemon was down. Database diagnostics expose `PRAGMA quick_check` and schema version.
+
+`usage_buckets` is an optional derived local aggregate for the Activity heatmap. It has six
+four-hour blocks per accounting day and game identity, not a raw timeline. The engine only queues
+blocks while its monotonic and wall-clock intervals agree, then flushes them with the normal
+checkpoint/session-close write cadence. Suspend gaps and material clock jumps are omitted instead
+of being assigned to an invented hour. Existing session history is never backfilled into this
+table, so usage totals remain useful immediately without presenting approximate heatmap data as
+fact.
 
 ## IPC
 

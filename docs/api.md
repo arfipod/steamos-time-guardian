@@ -41,6 +41,7 @@ The socket is `0600`, directory `0700`, and Linux `SO_PEERCRED` must match daemo
 | `history.export` | `json`/`csv` | textual content |
 | `summary.daily` | `start_day`, `days` | daily rows |
 | `summary.weekly` | `end_day` | seven-day summary |
+| `summary.activity` | optional `end_day`, `days` (1–90) | compact activity summary |
 | `diagnostics.get` | — | redacted health snapshot |
 
 ## Adapter methods
@@ -54,6 +55,25 @@ The socket is `0600`, directory `0700`, and Linux `SO_PEERCRED` must match daemo
 | `simulation.emit` | simulator | deterministic events |
 
 All fields have type/range/length limits. The service does not execute arbitrary commands, methods, or paths.
+
+## Activity summary
+
+`summary.activity` is the local data source for the controller-friendly Activity view. It returns
+the selected accounting-day range, exact stored daily totals, up to three top games, recent
+sessions, and a six-block (`00–04` … `20–24`) heatmap per day. It is bounded to 90 days and does
+not include process IDs, paths, or other detector metadata.
+
+The daily totals and game rankings use the retained session history, so they include history from
+before this feature existed. The heatmap is deliberately different: it begins recording only after
+the daemon has been upgraded to database schema 3. During normal active play, the engine derives
+the blocks from matching monotonic and wall-clock intervals, keeps them in memory, and writes them
+at the ordinary history checkpoint or session close. It omits uncertain intervals after suspend or
+a material clock jump rather than guessing which hour was played. Consequently, a heatmap can be
+partially populated while its exact totals remain complete.
+
+`day_key` follows the configured accounting-day reset, while the block labels use the configured
+time zone. This keeps the Activity view aligned with Time Guardian's daily limits, including a
+non-midnight reset.
 
 ## Events
 

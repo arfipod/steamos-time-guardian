@@ -51,6 +51,6 @@ PY
 import json, sys
 data=json.load(open(sys.argv[1], encoding='utf-8'))
 assert data['database']['quick_check']=='ok', data
-assert data['database']['schema_version']==2, data
+assert data['database']['schema_version']==3, data
 PY
 info "Simulation smoke test passed"

@@ -66,9 +66,12 @@ python3 -m zipfile -t steamos-time-guardian.zip
 mkdir -p "$HOME/stg-validation-src"
 python3 -m zipfile -e steamos-time-guardian.zip "$HOME/stg-validation-src"
 cd "$HOME/stg-validation-src/steamos-time-guardian"
+find scripts tools -type f -name '*.sh' -exec chmod 0755 {} +
 ```
 
-If the extraction target already exists, stop and ask before removal. Expected: checksum and archive test pass.
+If the extraction target already exists, stop and ask before removal. Python's `zipfile` extractor
+does not restore Unix executable bits, so explicitly restore them after extraction. Expected:
+checksum and archive test pass.
 
 ## 5. Pre-install validation
 
@@ -110,7 +113,7 @@ steamos-time-guardian --json status | python3 -m json.tool
 steamos-time-guardian --json diagnose | python3 -m json.tool
 ```
 
-Expected: directory `0700`, socket `srw-------`, DB quick check `ok`, schema 2, level 0.
+Expected: directory `0700`, socket `srw-------`, DB quick check `ok`, database schema 3, level 0.
 
 ## 8. Desktop interface
 
@@ -120,7 +123,7 @@ Switch to Desktop Mode and launch “SteamOS Time Guardian”, or run:
 steamos-time-guardian tui
 ```
 
-Expected: Summary, Timer, Daily Limit, Weekly, History, Settings, Diagnostics; readable text and usable controls. Validate D-pad/sticks/touch on-device. No permanent overlay.
+Expected: Summary, Timer, Daily Limit, Weekly, Activity, Settings, Diagnostics; readable text and usable controls. Validate D-pad/sticks/touch on-device. No permanent overlay.
 
 ## 9. Isolated simulator on device
 
@@ -248,8 +251,8 @@ Measure idle, active, QAM, Decky disconnected, suspend/resume, and soak. Record 
 ## 18. Logs and support bundle
 
 ```bash
-./scripts/diagnose.sh --bundle "$HOME/stg-support-validation.tar.gz"
-tar -tzf "$HOME/stg-support-validation.tar.gz"
+./scripts/diagnose.sh --bundle "$HOME/stg-support-validation.zip"
+python3 -m zipfile -t "$HOME/stg-support-validation.zip"
 ```
 
 Expected: health/config/log excerpts, no session export, no secrets, home path redacted. Inspect manually.

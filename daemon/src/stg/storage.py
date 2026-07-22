@@ -5,18 +5,20 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import shutil
 import sqlite3
 import threading
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from uuid import uuid4
 
 from .models import GameIdentity, TimerSnapshot, TimerState
 
-CURRENT_DB_SCHEMA = 2
+CURRENT_DB_SCHEMA = 3
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -89,6 +91,21 @@ MIGRATIONS: dict[int, str] = {
         );
         INSERT OR IGNORE INTO schema_migrations(version, applied_at)
             VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    """,
+    3: """
+        CREATE TABLE IF NOT EXISTS usage_buckets (
+            day_key TEXT NOT NULL,
+            bucket_index INTEGER NOT NULL CHECK(bucket_index BETWEEN 0 AND 5),
+            app_key TEXT NOT NULL,
+            app_id TEXT,
+            app_name TEXT NOT NULL,
+            seconds REAL NOT NULL CHECK(seconds >= 0),
+            PRIMARY KEY(day_key, bucket_index, app_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_buckets_day
+            ON usage_buckets(day_key, bucket_index);
+        CREATE INDEX IF NOT EXISTS idx_usage_buckets_app
+            ON usage_buckets(app_key, day_key);
     """,
 }
 
@@ -523,6 +540,183 @@ class Storage:
             "days": days,
         }
 
+    def add_usage_buckets(self, entries: Iterable[Mapping[str, Any]]) -> int:
+        """Accumulate future activity into six four-hour buckets per accounting day.
+
+        The caller is responsible for deriving entries from live monotonic accounting.  This
+        storage layer deliberately never reconstructs time-of-day activity from old sessions,
+        because suspend and detector gaps would make that historical inference misleading.
+        """
+        rows = [self._usage_bucket_row(entry) for entry in entries]
+        if not rows:
+            return 0
+        with self.transaction() as conn:
+            conn.executemany(
+                "INSERT INTO usage_buckets(day_key,bucket_index,app_key,app_id,app_name,seconds) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(day_key,bucket_index,app_key) DO UPDATE SET "
+                "app_id=COALESCE(excluded.app_id,usage_buckets.app_id), "
+                "app_name=excluded.app_name, "
+                "seconds=usage_buckets.seconds + excluded.seconds",
+                rows,
+            )
+        return len(rows)
+
+    def list_usage_buckets(
+        self, start_day: date | None = None, end_day: date | None = None
+    ) -> list[dict[str, Any]]:
+        """Return retained activity buckets, optionally bounded by inclusive day keys."""
+        start_key, end_key = self._usage_bucket_range(start_day, end_day)
+        clauses: list[str] = []
+        params: list[str] = []
+        if start_key is not None:
+            clauses.append("day_key >= ?")
+            params.append(start_key)
+        if end_key is not None:
+            clauses.append("day_key <= ?")
+            params.append(end_key)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.connection.execute(
+            "SELECT day_key,bucket_index,app_key,app_id,app_name,seconds FROM usage_buckets"
+            f"{where} ORDER BY day_key ASC,bucket_index ASC,app_key ASC",
+            tuple(params),
+        ).fetchall()
+        return [
+            {
+                "day_key": row["day_key"],
+                "bucket_index": int(row["bucket_index"]),
+                "app_key": row["app_key"],
+                "app_id": row["app_id"],
+                "app_name": row["app_name"],
+                "seconds": round(float(row["seconds"])),
+            }
+            for row in rows
+        ]
+
+    def activity_summary(self, end_day: date, days: int, timezone: str) -> dict[str, Any]:
+        """Summarize exact session totals plus only explicitly recorded activity buckets."""
+        if isinstance(end_day, datetime) or not isinstance(end_day, date):
+            raise ValueError("end_day must be a date")
+        if not 1 <= days <= 366:
+            raise ValueError("days must be between 1 and 366")
+        if not isinstance(timezone, str) or not timezone.strip() or len(timezone) > 128:
+            raise ValueError("timezone must contain 1..128 characters")
+
+        start_day = end_day - timedelta(days=days - 1)
+        start_key, end_key = start_day.isoformat(), end_day.isoformat()
+        day_rows = self.connection.execute(
+            "SELECT day_key,SUM(duration_seconds) AS seconds FROM sessions "
+            "WHERE day_key >= ? AND day_key <= ? GROUP BY day_key",
+            (start_key, end_key),
+        ).fetchall()
+        day_totals = {str(row["day_key"]): round(float(row["seconds"])) for row in day_rows}
+        summary_days = [
+            {
+                "day_key": (start_day + timedelta(days=offset)).isoformat(),
+                "total_seconds": day_totals.get((start_day + timedelta(days=offset)).isoformat(), 0),
+            }
+            for offset in range(days)
+        ]
+        total_seconds = sum(day_totals.values())
+
+        top_rows = self.connection.execute(
+            "SELECT "
+            "CASE WHEN app_id IS NOT NULL AND app_id <> '0' THEN app_id ELSE NULL END AS app_id,"
+            "CASE WHEN app_id IS NOT NULL AND app_id <> '0' THEN 'app:' || app_id "
+            "ELSE 'name:' || lower(app_name) END AS stable_key,"
+            "MAX(app_name) AS app_name,SUM(duration_seconds) AS seconds,COUNT(*) AS sessions "
+            "FROM sessions WHERE day_key >= ? AND day_key <= ? "
+            "GROUP BY stable_key "
+            "ORDER BY seconds DESC,app_name COLLATE NOCASE ASC,stable_key ASC LIMIT 3",
+            (start_key, end_key),
+        ).fetchall()
+        top_games = [
+            {
+                "app_id": row["app_id"],
+                "app_name": row["app_name"],
+                "seconds": round(float(row["seconds"])),
+                "sessions": int(row["sessions"]),
+            }
+            for row in top_rows
+        ]
+
+        recent_rows = self.connection.execute(
+            "SELECT id,day_key,app_id,app_name,started_at,ended_at,duration_seconds,reason "
+            "FROM sessions WHERE day_key >= ? AND day_key <= ? "
+            "ORDER BY started_at DESC LIMIT 3",
+            (start_key, end_key),
+        ).fetchall()
+        recent_sessions = [
+            {
+                "id": row["id"],
+                "day_key": row["day_key"],
+                "app_id": row["app_id"],
+                "app_name": row["app_name"],
+                "started_at": row["started_at"],
+                "ended_at": row["ended_at"],
+                "duration_seconds": round(float(row["duration_seconds"])),
+                "reason": row["reason"],
+            }
+            for row in recent_rows
+        ]
+
+        heatmap_rows = self.connection.execute(
+            "SELECT day_key,bucket_index,SUM(seconds) AS seconds FROM usage_buckets "
+            "WHERE day_key >= ? AND day_key <= ? GROUP BY day_key,bucket_index",
+            (start_key, end_key),
+        ).fetchall()
+        heatmap_by_day = {(start_day + timedelta(days=offset)).isoformat(): [0] * 6 for offset in range(days)}
+        recorded_seconds = 0
+        for row in heatmap_rows:
+            seconds = round(float(row["seconds"]))
+            buckets = heatmap_by_day[str(row["day_key"])]
+            buckets[int(row["bucket_index"])] = seconds
+            recorded_seconds += seconds
+        heatmap_values = [value for buckets in heatmap_by_day.values() for value in buckets]
+        peak: dict[str, Any] | None = None
+        for day_key, buckets in heatmap_by_day.items():
+            for bucket_index, seconds in enumerate(buckets):
+                if seconds <= 0:
+                    continue
+                if peak is None or seconds > peak["seconds"] or (
+                    seconds == peak["seconds"]
+                    and (day_key, bucket_index) > (peak["day_key"], peak["bucket_index"])
+                ):
+                    peak = {
+                        "day_key": day_key,
+                        "bucket_index": bucket_index,
+                        "seconds": seconds,
+                    }
+
+        return {
+            "schema_version": 1,
+            "range": {
+                "start_day": start_key,
+                "end_day": end_key,
+                "days": days,
+                "timezone": timezone,
+            },
+            "total_seconds": total_seconds,
+            "days": summary_days,
+            "top_games": top_games,
+            "peak": peak,
+            "heatmap": {
+                "available": bool(heatmap_rows),
+                "bucket_hours": 4,
+                "recorded_seconds": recorded_seconds,
+                "max_seconds": max(heatmap_values, default=0),
+                "days": [
+                    {
+                        "day_key": day_key,
+                        "total_seconds": day_totals.get(day_key, 0),
+                        "buckets": buckets,
+                    }
+                    for day_key, buckets in heatmap_by_day.items()
+                ],
+            },
+            "recent_sessions": recent_sessions,
+        }
+
     def clear_history(self) -> None:
         with self.transaction() as conn:
             if conn.execute("SELECT 1 FROM sessions WHERE ended_at IS NULL").fetchone():
@@ -531,9 +725,12 @@ class Storage:
             conn.execute("DELETE FROM events")
             conn.execute("DELETE FROM daily_adjustments")
             conn.execute("DELETE FROM notification_marks")
+            conn.execute("DELETE FROM usage_buckets")
 
     def enforce_retention(self, retention_days: int, now: datetime) -> dict[str, int]:
         cutoff = utc_iso(now - timedelta(days=retention_days))
+        current = now if now.tzinfo else now.replace(tzinfo=UTC)
+        bucket_cutoff = (current.astimezone(UTC).date() - timedelta(days=retention_days)).isoformat()
         with self.transaction() as conn:
             session_cursor = conn.execute(
                 "DELETE FROM sessions WHERE ended_at IS NOT NULL AND ended_at < ?", (cutoff,)
@@ -545,11 +742,15 @@ class Storage:
             notification_cursor = conn.execute(
                 "DELETE FROM notification_marks WHERE emitted_at < ?", (cutoff,)
             )
+            usage_bucket_cursor = conn.execute(
+                "DELETE FROM usage_buckets WHERE day_key < ?", (bucket_cutoff,)
+            )
         return {
             "sessions": session_cursor.rowcount,
             "events": event_cursor.rowcount,
             "adjustments": adjustment_cursor.rowcount,
             "notification_marks": notification_cursor.rowcount,
+            "usage_buckets": usage_bucket_cursor.rowcount,
         }
 
     def export(self, format_name: str) -> str:
@@ -562,6 +763,7 @@ class Storage:
                     "sessions": sessions,
                     "adjustments": self.list_adjustments(limit=None),
                     "events": self.list_events(limit=None),
+                    "usage_buckets": self.list_usage_buckets(),
                 },
                 indent=2,
                 sort_keys=True,
@@ -589,3 +791,50 @@ class Storage:
 
     def schema_version(self) -> int:
         return int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+
+    @staticmethod
+    def _usage_bucket_row(entry: Mapping[str, Any]) -> tuple[str, int, str, str | None, str, float]:
+        day_key = entry.get("day_key")
+        if not isinstance(day_key, str):
+            raise ValueError("usage bucket day_key must be an ISO date")
+        try:
+            parsed_day = date.fromisoformat(day_key)
+        except ValueError as exc:
+            raise ValueError("usage bucket day_key must be an ISO date") from exc
+        if parsed_day.isoformat() != day_key:
+            raise ValueError("usage bucket day_key must be an ISO date")
+
+        bucket_index = entry.get("bucket_index")
+        if isinstance(bucket_index, bool) or not isinstance(bucket_index, int):
+            raise ValueError("usage bucket bucket_index must be an integer")
+        if not 0 <= bucket_index < 6:
+            raise ValueError("usage bucket bucket_index must be between 0 and 5")
+
+        app_key = entry.get("app_key")
+        if not isinstance(app_key, str) or not app_key.strip() or len(app_key) > 256:
+            raise ValueError("usage bucket app_key must contain 1..256 characters")
+        app_id = entry.get("app_id")
+        if app_id is not None and (not isinstance(app_id, str) or not app_id.isdecimal() or len(app_id) > 32):
+            raise ValueError("usage bucket app_id must be a decimal string or null")
+        app_name = entry.get("app_name")
+        if not isinstance(app_name, str) or not app_name.strip() or len(app_name) > 200:
+            raise ValueError("usage bucket app_name must contain 1..200 characters")
+
+        raw_seconds = entry.get("seconds")
+        if isinstance(raw_seconds, bool) or not isinstance(raw_seconds, (int, float)):
+            raise ValueError("usage bucket seconds must be a positive number")
+        seconds = float(raw_seconds)
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("usage bucket seconds must be a positive number")
+        return day_key, bucket_index, app_key, app_id, app_name, seconds
+
+    @staticmethod
+    def _usage_bucket_range(start_day: date | None, end_day: date | None) -> tuple[str | None, str | None]:
+        for value, name in ((start_day, "start_day"), (end_day, "end_day")):
+            if value is not None and (isinstance(value, datetime) or not isinstance(value, date)):
+                raise ValueError(f"{name} must be a date")
+        start_key = start_day.isoformat() if start_day else None
+        end_key = end_day.isoformat() if end_day else None
+        if start_key is not None and end_key is not None and start_key > end_key:
+            raise ValueError("start_day must not be after end_day")
+        return start_key, end_key

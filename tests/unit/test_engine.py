@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from stg.engine import DomainError
 from stg.models import GameIdentity, TimerState
+
 from tests.helpers import EngineFixture, test_config
 
 
@@ -63,6 +64,70 @@ class EngineTests(unittest.TestCase):
         events = self.engine.tick()
         self.assertEqual(self.engine.status()["played_today_seconds"], 10)
         self.assertIn("system.suspend_inferred", [event.kind for event in events])
+
+    def test_activity_buckets_split_at_a_four_hour_boundary(self):
+        self.fixture.close()
+        self.fixture = EngineFixture(datetime(2026, 7, 20, 3, 59, 50, tzinfo=UTC))
+        self.engine, self.clock = self.fixture.engine, self.fixture.clock
+        self.start_game()
+
+        self.clock.advance(20)
+        self.engine.tick()
+        self.engine.stop_game()
+
+        buckets = self.fixture.storage.list_usage_buckets()
+        by_index = {bucket["bucket_index"]: bucket["seconds"] for bucket in buckets}
+        self.assertEqual(by_index, {0: 10, 1: 10})
+
+    def test_activity_buckets_omit_a_suspend_gap(self):
+        self.start_game()
+        self.clock.advance(10)
+        self.engine.tick()
+        self.clock.advance(0, wall_seconds=3600)
+        self.engine.tick()
+
+        buckets = self.fixture.storage.list_usage_buckets()
+        self.assertEqual(sum(bucket["seconds"] for bucket in buckets), 10)
+
+    def test_activity_buckets_rotate_with_the_accounting_day(self):
+        self.fixture.close()
+        config = test_config(daily_limits={**test_config()["daily_limits"], "reset_at": "00:00", "timezone": "UTC"})
+        self.fixture = EngineFixture(datetime(2026, 7, 20, 23, 59, 50, tzinfo=UTC), config)
+        self.engine, self.clock = self.fixture.engine, self.fixture.clock
+        self.start_game()
+
+        self.clock.advance(20)
+        self.engine.tick()
+
+        buckets = self.fixture.storage.list_usage_buckets()
+        by_day_and_index = {
+            (bucket["day_key"], bucket["bucket_index"]): bucket["seconds"] for bucket in buckets
+        }
+        self.assertEqual(
+            by_day_and_index,
+            {("2026-07-20", 5): 10, ("2026-07-21", 0): 10},
+        )
+
+    def test_activity_buckets_preserve_elapsed_time_through_dst_fallback(self):
+        self.fixture.close()
+        config = test_config(
+            daily_limits={
+                **test_config()["daily_limits"],
+                "reset_at": "00:00",
+                "timezone": "Europe/Madrid",
+            }
+        )
+        self.fixture = EngineFixture(datetime(2026, 10, 25, 0, 30, tzinfo=UTC), config)
+        self.engine, self.clock = self.fixture.engine, self.fixture.clock
+        self.start_game()
+
+        self.clock.advance(3 * 60 * 60)
+        self.engine.tick()
+
+        buckets = self.fixture.storage.list_usage_buckets()
+        by_index = {bucket["bucket_index"]: bucket["seconds"] for bucket in buckets}
+        self.assertEqual(by_index, {0: 9000, 1: 1800})
+        self.assertEqual(sum(by_index.values()), 3 * 60 * 60)
 
     def test_explicit_suspend_resume(self):
         self.start_game()

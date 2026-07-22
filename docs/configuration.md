@@ -68,7 +68,9 @@ UI false positives.
 
 ### History and logging
 
-History retention is 1–3650 days, default 90. Checkpoint is 5–600 seconds, default 30.
+History retention is 1–3650 days, default 90. Checkpoint is 5–600 seconds, default 30. The
+Activity heatmap uses the same retention and checkpoint cadence; it is a compact local aggregate,
+not a per-minute activity log.
 `history.backup_count` keeps up to 0–20 automatic SQLite snapshots before a schema migration;
 default 3. Logs support `DEBUG`, `INFO`, `WARNING`, and `ERROR`, with size-based rotation.
 
@@ -114,4 +116,4 @@ Do not assume the `sqlite3` CLI exists on SteamOS; built-in diagnostics use Pyth
 
 ## Backups and exports
 
-For a complete backup, stop the service and copy config/data directories. The support bundle excludes history. JSON export includes metadata and arrays of sessions/adjustments/events; CSV export contains session fields. Export never uploads data.
+For a complete backup, stop the service and copy config/data directories. The support bundle excludes history. JSON export includes metadata and arrays of sessions/adjustments/events plus any recorded Activity heatmap buckets; CSV export contains session fields. Export never uploads data.

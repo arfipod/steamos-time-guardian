@@ -1,10 +1,13 @@
 [Desktop Entry]
 Type=Application
 Name=SteamOS Time Guardian
+Name[es]=Control de tiempo de SteamOS
 Comment=View play time, timers, limits, history, and diagnostics
+Comment[es]=Consulta el tiempo de juego, temporizadores, límites, historial y diagnóstico
 Exec=steamos-time-guardian tui
 Icon=steamos-time-guardian
 Terminal=true
 Categories=Utility;Game;
 Keywords=Steam;Deck;Timer;Time;Limit;
+Keywords[es]=Steam;Deck;Temporizador;Tiempo;Límite;
 StartupNotify=false

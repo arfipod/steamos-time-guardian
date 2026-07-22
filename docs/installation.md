@@ -104,7 +104,7 @@ steamos-time-guardian --json diagnose
 journalctl --user -u steamos-time-guardian.service --since -10m
 ```
 
-Expected: active user service, runtime socket, DB quick check `ok`, schema version 2, restriction level 0.
+Expected: active user service, runtime socket, DB quick check `ok`, database schema version 3, restriction level 0.
 
 ## Uninstall while retaining data
 

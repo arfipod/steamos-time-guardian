@@ -36,6 +36,11 @@ False negatives are preferred over dangerous false positives.
 
 Freedesktop notifications may not appear over Game Mode. DST/nonexistent local reset times have policy ambiguity despite deterministic `zoneinfo` behavior. SQLite/WAL reduces but does not eliminate storage loss; a hard crash can undercount up to the checkpoint interval.
 
+The Activity heatmap is not backfilled from older sessions: their monotonic duration cannot be
+assigned reliably to wall-clock hours after a suspend or daemon gap. It starts collecting after
+the schema-3 upgrade and omits intervals with a material wall-clock discrepancy rather than
+showing guessed activity. Daily totals and game rankings continue to use all retained sessions.
+
 ## Packaging
 
 Runtime assumes Python 3.11+ on target SteamOS and must be confirmed. The plugin bundle targets the observed Decky model; store submission and current-device compatibility review are pending.

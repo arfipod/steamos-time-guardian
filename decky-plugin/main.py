@@ -102,8 +102,8 @@ class Plugin:
     async def daily_grant(self, minutes: int, reason: str) -> dict[str, Any]:
         return await self._rpc("daily.grant", {"seconds": int(minutes) * 60, "reason": str(reason)})
 
-    async def history_list(self, limit: int = 30) -> dict[str, Any]:
-        return await self._rpc("history.list", {"limit": int(limit)})
+    async def activity_summary(self, days: int = 7) -> dict[str, Any]:
+        return await self._rpc("summary.activity", {"days": int(days)})
 
     async def history_clear(self, confirmation: str) -> dict[str, Any]:
         return await self._rpc("history.clear", {"confirmation": confirmation})

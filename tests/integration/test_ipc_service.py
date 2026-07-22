@@ -4,11 +4,14 @@ import asyncio
 import json
 import tempfile
 import unittest
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from stg.events import EventBus
 from stg.ipc import MAX_MESSAGE_BYTES, RpcError, UnixRpcClient, UnixRpcServer
+from stg.models import GameIdentity
 from stg.service import GuardianService
+
 from tests.helpers import temporary_paths
 
 
@@ -83,6 +86,36 @@ class ServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.client.call("config.update", {"patch": {"timer": {"default_action": "close"}}})
         result = await self.client.call("timer.start", {"seconds": 120})
         self.assertEqual(result["status"]["timer"]["action"], "close")
+
+    async def test_activity_summary_is_bounded_and_local(self):
+        end_day = date.fromisoformat(self.service.engine.day_key)
+        game = GameIdentity("777", "IPC Game", "simulation")
+        started = datetime.combine(end_day, datetime.min.time(), tzinfo=UTC)
+        session_id = self.service.storage.open_session(end_day.isoformat(), game, started)
+        self.service.storage.close_session(session_id, 120, started, "test")
+        self.service.storage.add_usage_buckets(
+            [
+                {
+                    "day_key": end_day.isoformat(),
+                    "bucket_index": 3,
+                    "app_key": "app:777",
+                    "app_id": "777",
+                    "app_name": "IPC Game",
+                    "seconds": 120,
+                }
+            ]
+        )
+
+        result = await self.client.call("summary.activity", {"days": 7})
+
+        self.assertEqual(result["range"]["end_day"], end_day.isoformat())
+        self.assertEqual(len(result["days"]), 7)
+        self.assertEqual(result["top_games"][0]["app_name"], "IPC Game")
+        self.assertEqual(result["heatmap"]["days"][-1]["buckets"][3], 120)
+        self.assertLess(len(json.dumps(result)), 64 * 1024)
+        with self.assertRaises(RpcError) as invalid_days:
+            await self.client.call("summary.activity", {"days": 91})
+        self.assertEqual(invalid_days.exception.code, "invalid_params")
 
     async def test_strict_boolean_and_pid_validation(self):
         with self.assertRaises(RpcError) as boolean_error:

@@ -243,6 +243,24 @@ class GuardianService:
             day_text = str(params.get("end_day", self.engine.day_key))
             end = date.fromisoformat(self._validate_day_key(day_text))
             return self.storage.weekly_summary(end)
+        if method == "summary.activity":
+            days = self._require_int(params, "days", 1, 90, default=7)
+            requested_end = params.get("end_day")
+            async with self._lock:
+                events = self.engine.tick()
+                day_text = (
+                    self.engine.day_key
+                    if requested_end is None
+                    else self._validate_day_key(str(requested_end))
+                )
+                end = date.fromisoformat(day_text)
+                result = self.storage.activity_summary(
+                    end,
+                    days,
+                    self.config["daily_limits"]["timezone"],
+                )
+            await self._dispatch_many(events)
+            return result
         if method == "diagnostics.get":
             async with self._lock:
                 status = self.engine.status()

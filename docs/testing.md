@@ -23,7 +23,11 @@
 
 ## Covered behavior
 
-Remaining time, daily reset, weekday/unlimited/allowed periods, timer state, suspend gaps, wall-clock changes, config/database migration, restart recovery, IPC validation/concurrency, history/summaries/retention/clear/export, warning deduplication, all restriction modes, process verification, notification behavior, detector errors/log parsing, and auxiliary PID grouping.
+Remaining time, daily reset, weekday/unlimited/allowed periods, timer state, suspend gaps,
+wall-clock changes, config/database migration, restart recovery, IPC validation/concurrency,
+history/summaries/retention/clear/export, Activity buckets across four-hour and daily boundaries,
+warning deduplication, all restriction modes, process verification, notification behavior,
+detector errors/log parsing, and auxiliary PID grouping.
 
 ## Fixtures and simulator
 
@@ -45,4 +49,8 @@ The simulator validates orchestration/domain behavior, not Gamescope/Steam/Decky
 
 ## Rules for new tests
 
-Every compatibility change needs a fixture and negative case. Every schema change needs migration/corruption tests. Every enforcement change must prove unrelated/same-name processes are not selected. Use `FakeClock`, not sleeps.
+Every compatibility change needs a fixture and negative case. Every schema change needs
+migration/corruption tests. Activity heatmap changes must prove that suspend and material clock
+gaps are omitted instead of inferred, and that the bucket sum never exceeds active monotonic time.
+Every enforcement change must prove unrelated/same-name processes are not selected. Use
+`FakeClock`, not sleeps.
