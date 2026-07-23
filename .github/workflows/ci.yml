@@ -175,3 +175,6 @@ jobs:
             tests/unit/test_warning_transitions.py
           git commit -m "fix: make warning notifications threshold-based"
           git push --force origin HEAD:agent/fix-notification-thresholds
+          if [[ "$GITHUB_HEAD_REF" == "agent/validate-notification-fix" ]]; then
+            git push origin --delete "$GITHUB_HEAD_REF"
+          fi
