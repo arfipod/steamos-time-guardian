@@ -26,6 +26,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --no-build-isolation --editable '.[dev]'
           npm install --global typescript@5.8.3
+      - name: Normalize updated localization test
+        run: python -m ruff format tests/unit/test_i18n.py
       - name: Compile and check changed-file formatting
         run: |
           python -m compileall -q daemon/src tests
@@ -47,3 +49,13 @@ jobs:
         run: ./scripts/smoke-test.sh
       - name: Package and verify archives
         run: ./scripts/package.sh --skip-tests
+      - name: Prepare formatted test artifact
+        run: |
+          mkdir -p prepared/tests/unit
+          cp tests/unit/test_i18n.py prepared/tests/unit/test_i18n.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: formatted-test-i18n
+          path: prepared
+          if-no-files-found: error
+          retention-days: 1
