@@ -227,3 +227,55 @@ daemon and optional plugin while preserving data:
 ```
 
 No uninstall, data purge, Steam restart, or forced game termination was performed in this phase.
+
+## Notification-threshold update — 2026-07-24
+
+The owner approved an in-place update from `main` at commit `5611e0a`, with a plugin and runtime
+backup, a user-service restart, restriction level 0, force kill disabled, and no game test or
+Steam/Decky restart. The target remained the same Jupiter revision-1 Deck on SteamOS 3.8.16
+(build 20260716.1), kernel 6.16.12-valve24.5-1-neptune-616-gb2f7cfe85e45, Python 3.13.5, and
+Decky 3.2.6. The account was `deck` (UID 1000), and `/home` had 174 GiB available.
+
+The newly built project archive had SHA-256
+`8f60e27917807ee0e7c7a1cfca6cc66ae3238db6fd424cfa6fa36fd48dbd3a70`. Its checksum and ZIP
+integrity passed on the Deck before extraction. The five relevant installed Decky files
+(`plugin.json`, `main.py`, `package.json`, `dist/index.js`, and `dist/index.js.map`) matched
+`main` byte for byte. Because the plugin directory remains `root:root` mode `0755`, no privileged
+write was justified: the adapter was left untouched and no `sudo`, Decky reload, or Steam restart
+was performed. A recovery copy was retained at
+`~/stg-backups/SteamOS-Time-Guardian-plugin-20260723T222715Z`.
+
+The extracted source passed the Python-only build and simulator smoke test. The supplied
+`test.sh --python-only` fallback reported zero tests because `unittest` discovery did not recurse
+into the non-package `tests/unit` and `tests/integration` directories. Explicit discovery of those
+two directories ran 73 unit and 14 integration tests successfully. Python 3.13 emitted repeated
+`ResourceWarning` messages for log files replaced by `configure_logging`; they did not fail the
+tests but remain cleanup work. A scan found no executable `steamos-readonly` or `sudo pacman`
+mutation path.
+
+Before installation, the previous user runtime, launcher, and unit were copied to
+`~/stg-backups/steamos-time-guardian-runtime-20260723T222715Z`. The unprivileged installer updated
+the daemon and related user files without the Decky option, preserved configuration and data, and
+restarted only `steamos-time-guardian.service`. The installed `stg` tree then matched the extracted
+package. In particular, `engine.py` changed from SHA-256
+`7b6f9bf82cdd5366c22207cdd7befe6414fe568dc22d130f982816d9200a5c88` to
+`53622953e3908e0aaeb7065cfb96cfb8fc39303082330530c9bd900985b8b82c`, matching the validated
+source.
+
+Final health checks showed the service active, database schema 3 with `quick_check: ok`, runtime
+directory mode `0700`, same-UID Unix socket mode `0600`, configured and effective restriction
+level 0, and force kill disabled. The Steam-log/procfs detector combination was active. The
+rootless Decky bridge remained running and continued sending a recent heartbeat after two daemon
+reconnections. No game was active or targeted.
+
+The update also reproduced an unresolved shutdown defect twice. On each controlled user-service
+restart, the daemon did not exit within `TimeoutStopSec=15`; systemd sent `SIGKILL` to the daemon
+process and immediately started a healthy replacement. The second reproduction had no child
+process and no active game, so the issue is not attributable to game enforcement. No game,
+Steam, Decky, or unrelated process was killed. Graceful daemon shutdown with a live Decky bridge
+must be diagnosed and fixed before claiming clean restart behavior.
+
+The transferred archive and extracted source remain under `~/stg-update-5611e0a` and
+`~/stg-validation-src-5611e0a` respectively. They, together with the two dated backups, provide a
+non-destructive recovery path. No uninstall, data purge, plugin overwrite, or hardware-only UI
+claim was made during this update.
