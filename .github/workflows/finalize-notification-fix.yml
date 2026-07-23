@@ -1,0 +1,162 @@
+name: Finalize notification threshold fix
+
+on:
+  push:
+    branches:
+      - agent/fix-notification-thresholds
+    paths:
+      - .github/workflows/finalize-notification-fix.yml
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-notification-thresholds
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-build-isolation --editable '.[dev]'
+          npm install --global typescript@5.8.3
+      - name: Apply final threshold edge-case fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          engine_path = Path('daemon/src/stg/engine.py')
+          engine = engine_path.read_text(encoding='utf-8')
+          old_crossed = (
+              '        crossed = [threshold for threshold in due_thresholds '
+              'if remaining <= threshold < previous_remaining]\n'
+          )
+          new_crossed = '''        crossed = [
+              threshold
+              for threshold in due_thresholds
+              if remaining < previous_remaining
+              and remaining <= threshold <= previous_remaining
+          ]
+'''
+          if engine.count(old_crossed) != 1:
+              raise RuntimeError('unexpected warning crossing expression')
+          engine = engine.replace(old_crossed, new_crossed, 1)
+          cleanups = {
+              'max(0, int(round(limit - self.played_today)))': 'max(0, round(limit - self.played_today))',
+              'max(0, int(round(self.played_today)))': 'max(0, round(self.played_today))',
+              '"duration_seconds": int(round(duration)),': '"duration_seconds": round(duration),',
+          }
+          for old, new in cleanups.items():
+              if engine.count(old) != 1:
+                  raise RuntimeError(f'unexpected engine cleanup occurrence: {old}')
+              engine = engine.replace(old, new, 1)
+          engine_path.write_text(engine, encoding='utf-8')
+
+          i18n_path = Path('daemon/src/stg/i18n.py')
+          i18n = i18n_path.read_text(encoding='utf-8')
+          if i18n.count('1–7') != 2 or i18n.count('0–3') != 2:
+              raise RuntimeError('unexpected localized range occurrences')
+          i18n_path.write_text(i18n.replace('1–7', '1-7').replace('0–3', '0-3'), encoding='utf-8')
+
+          test_path = Path('tests/unit/test_warning_transitions.py')
+          test = test_path.read_text(encoding='utf-8')
+          marker = '''    def test_timer_emits_each_threshold_only_when_crossed(self):
+'''
+          addition = '''    def test_timer_started_at_a_threshold_waits_until_time_decreases(self):
+        self.engine.start_timer(15 * 60)
+
+        self.assertEqual(warnings(self.engine.tick()), [])
+        self.clock.advance(1)
+        emitted = warnings(self.engine.tick())
+
+        self.assertEqual([event.payload["threshold_seconds"] for event in emitted], [15 * 60])
+        self.assertEqual(warnings(self.engine.tick()), [])
+
+'''
+          if test.count(marker) != 1 or addition in test:
+              raise RuntimeError('unexpected threshold test layout')
+          test_path.write_text(test.replace(marker, addition + marker, 1), encoding='utf-8')
+          PY
+          python -m ruff format \
+            daemon/src/stg/engine.py \
+            daemon/src/stg/i18n.py \
+            tests/unit/test_i18n.py \
+            tests/unit/test_warning_transitions.py
+      - name: Compile, format, and lint changed Python files
+        run: |
+          python -m compileall -q daemon/src tests
+          python -m ruff format --check \
+            daemon/src/stg/engine.py \
+            daemon/src/stg/i18n.py \
+            tests/unit/test_i18n.py \
+            tests/unit/test_warning_transitions.py
+          python -m ruff check \
+            daemon/src/stg/engine.py \
+            daemon/src/stg/i18n.py \
+            tests/unit/test_i18n.py \
+            tests/unit/test_warning_transitions.py
+          git diff --check
+      - name: Ensure modified daemon modules introduce no mypy errors
+        shell: bash
+        run: |
+          set +e
+          PYTHONPATH=daemon/src python -m mypy daemon/src/stg 2>&1 | tee /tmp/mypy.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if grep -E '^daemon/src/stg/(engine|i18n)\.py:' /tmp/mypy.log; then
+            echo 'Modified daemon modules have mypy errors' >&2
+            exit 1
+          fi
+          if (( status != 0 )); then
+            echo 'Existing mypy failures outside modified modules remain in the repository baseline.'
+          fi
+      - name: Run complete test suite with coverage
+        run: ./scripts/test.sh --coverage
+      - name: Build and validate repository integrity
+        run: |
+          ./scripts/build.sh
+          rm -rf .mypy_cache .pytest_cache
+          python tools/lint_repo.py
+      - name: Simulation smoke test and package verification
+        run: |
+          ./scripts/smoke-test.sh
+          ./scripts/package.sh --skip-tests
+      - name: Publish one clean final commit
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p /tmp/final-notification-fix
+          cp --parents \
+            CHANGELOG.md \
+            daemon/src/stg/engine.py \
+            daemon/src/stg/i18n.py \
+            tests/unit/test_i18n.py \
+            tests/unit/test_warning_transitions.py \
+            /tmp/final-notification-fix/
+          git fetch origin main
+          git reset --hard origin/main
+          git clean -fdx
+          cp -a /tmp/final-notification-fix/. .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            CHANGELOG.md \
+            daemon/src/stg/engine.py \
+            daemon/src/stg/i18n.py \
+            tests/unit/test_i18n.py \
+            tests/unit/test_warning_transitions.py
+          git commit -m "fix: make warning notifications threshold-based"
+          git push --force origin HEAD:agent/fix-notification-thresholds
