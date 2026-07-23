@@ -365,6 +365,18 @@ class GuardianEngine:
         self.storage.save_timer(self.timer)
         if seconds > 0 and self.timer.generation:
             self.storage.clear_notification_scope("timer", self.timer.generation)
+            # Adding time rearms lower thresholds, but landing exactly on a threshold is
+            # a new baseline rather than a downward crossing. Persist that boundary so
+            # the next elapsed second cannot emit an obsolete warning.
+            for minutes in self.config["warnings"]["threshold_minutes"]:
+                threshold = minutes * 60
+                if self.timer.remaining_seconds == threshold:
+                    self.storage.mark_notification(
+                        "timer",
+                        self.timer.generation,
+                        threshold,
+                        now,
+                    )
         events.append(
             self._record_event("timer.adjusted", {"seconds": seconds, "timer": self.timer.to_dict()})
         )
@@ -407,13 +419,13 @@ class GuardianEngine:
     def status(self) -> dict[str, Any]:
         now = self.clock.now_utc()
         limit = self._effective_daily_limit(now)
-        remaining = None if limit is None else max(0, int(round(limit - self.played_today)))
+        remaining = None if limit is None else max(0, round(limit - self.played_today))
         next_warning = self._next_warning_status(remaining)
         return {
             "schema_version": 1,
             "now": utc_iso(now),
             "day_key": self.day_key,
-            "played_today_seconds": max(0, int(round(self.played_today))),
+            "played_today_seconds": max(0, round(self.played_today)),
             "daily_limit_seconds": limit,
             "daily_adjustment_seconds": self.storage.adjustment_for_day(self.day_key),
             "remaining_today_seconds": remaining,
@@ -502,7 +514,11 @@ class GuardianEngine:
         due_thresholds = list(thresholds)
         if self.config["warnings"]["notify_at_exhaustion"]:
             due_thresholds.append(0)
-        crossed = [threshold for threshold in due_thresholds if remaining <= threshold < previous_remaining]
+        crossed = [
+            threshold
+            for threshold in due_thresholds
+            if remaining < previous_remaining and remaining <= threshold <= previous_remaining
+        ]
         newly_marked = [
             threshold
             for threshold in crossed
@@ -646,7 +662,7 @@ class GuardianEngine:
                 {
                     "game": game.to_dict(),
                     "session_id": session_id,
-                    "duration_seconds": int(round(duration)),
+                    "duration_seconds": round(duration),
                     "reason": reason,
                 },
             )

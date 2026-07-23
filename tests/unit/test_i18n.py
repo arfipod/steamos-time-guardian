@@ -24,8 +24,7 @@ class LocalizationTests(unittest.TestCase):
             daily_limits={
                 **test_config()["daily_limits"],
                 "weekly": {
-                    day: {"minutes": 1, "unlimited": False}
-                    for day in test_config()["daily_limits"]["weekly"]
+                    day: {"minutes": 1, "unlimited": False} for day in test_config()["daily_limits"]["weekly"]
                 },
             },
             warnings={**test_config()["warnings"], "threshold_minutes": [1]},

@@ -35,6 +35,19 @@ class WarningTransitionTests(unittest.TestCase):
             self.fixture.storage.notification_thresholds("timer", self.engine.timer.generation), set()
         )
 
+    def test_timer_started_at_a_threshold_waits_until_time_decreases(self):
+        self.engine.start_timer(15 * 60)
+
+        self.assertEqual(warnings(self.engine.tick()), [])
+        self.clock.advance(1)
+        emitted = warnings(self.engine.tick())
+
+        self.assertEqual(
+            [event.payload["threshold_seconds"] for event in emitted],
+            [15 * 60],
+        )
+        self.assertEqual(warnings(self.engine.tick()), [])
+
     def test_timer_emits_each_threshold_only_when_crossed(self):
         self.engine.start_timer(20 * 60)
         sequence = [(301, 15 * 60), (600, 5 * 60), (240, 60), (59, 0)]
