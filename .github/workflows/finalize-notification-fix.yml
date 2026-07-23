@@ -1,3 +1,4 @@
+# Temporary self-removing finalizer; the resulting branch will not contain this file.
 name: Finalize notification threshold fix
 
 on:
