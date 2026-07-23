@@ -1,9 +1,11 @@
-name: CI
+name: Validate notification threshold fix
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
+      - agent/validate-notification-fix
+    paths:
+      - .github/workflows/ci.yml
 
 permissions:
   contents: write
@@ -30,6 +32,8 @@ jobs:
           python -m pip install --no-build-isolation --editable '.[dev]'
           npm install --global typescript@5.8.3
       - name: Apply final threshold edge-case fixes
+        id: apply
+        continue-on-error: true
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -51,6 +55,7 @@ jobs:
               engine = engine.replace(old_crossed, new_crossed, 1)
           elif new_crossed not in engine:
               raise RuntimeError('unexpected warning crossing expression')
+
           cleanups = {
               'max(0, int(round(limit - self.played_today)))': 'max(0, round(limit - self.played_today))',
               'max(0, int(round(self.played_today)))': 'max(0, round(self.played_today))',
@@ -96,62 +101,78 @@ jobs:
             daemon/src/stg/i18n.py \
             tests/unit/test_i18n.py \
             tests/unit/test_warning_transitions.py
-      - name: Compile, format, and lint changed Python files
-        run: |
-          python -m compileall -q daemon/src tests
-          python -m ruff format --check \
-            daemon/src/stg/engine.py \
-            daemon/src/stg/i18n.py \
-            tests/unit/test_i18n.py \
-            tests/unit/test_warning_transitions.py
-          python -m ruff check \
-            daemon/src/stg/engine.py \
-            daemon/src/stg/i18n.py \
-            tests/unit/test_i18n.py \
-            tests/unit/test_warning_transitions.py
-          git diff --check
-      - name: Ensure modified daemon modules introduce no mypy errors
+      - name: Run complete validation and capture results
+        id: validate
         shell: bash
+        env:
+          APPLY_OUTCOME: ${{ steps.apply.outcome }}
         run: |
-          set +e
-          PYTHONPATH=daemon/src python -m mypy daemon/src/stg 2>&1 | tee /tmp/mypy.log
-          status=${PIPESTATUS[0]}
-          set -e
-          if grep -E '^daemon/src/stg/(engine|i18n)\.py:' /tmp/mypy.log; then
-            echo 'Modified daemon modules have mypy errors' >&2
-            exit 1
+          mkdir -p /tmp/notification-validation
+          summary=/tmp/notification-validation/summary.txt
+          : > "$summary"
+          ok=true
+
+          record() {
+            local name="$1"
+            local status="$2"
+            printf '%s=%s\n' "$name" "$status" >> "$summary"
+            if [[ "$status" != "0" ]]; then
+              ok=false
+            fi
+          }
+
+          run_check() {
+            local name="$1"
+            shift
+            set +e
+            "$@" > "/tmp/notification-validation/${name}.log" 2>&1
+            local status=$?
+            set -e
+            record "$name" "$status"
+          }
+
+          if [[ "$APPLY_OUTCOME" == "success" ]]; then
+            record apply 0
+          else
+            record apply 1
           fi
-          if (( status != 0 )); then
-            echo 'Existing mypy failures outside modified modules remain in the repository baseline.'
-          fi
-      - name: Run complete test suite with coverage
-        run: ./scripts/test.sh --coverage
-      - name: Build and validate repository integrity
-        run: |
-          ./scripts/build.sh
-          rm -rf .mypy_cache .pytest_cache
-          python tools/lint_repo.py
-      - name: Simulation smoke test and package verification
-        run: |
-          ./scripts/smoke-test.sh
-          ./scripts/package.sh --skip-tests
-      - name: Prepare validated source artifact
-        run: |
-          mkdir -p prepared
-          cp --parents \
-            CHANGELOG.md \
+
+          run_check compile python -m compileall -q daemon/src tests
+          run_check format python -m ruff format --check \
             daemon/src/stg/engine.py \
             daemon/src/stg/i18n.py \
             tests/unit/test_i18n.py \
-            tests/unit/test_warning_transitions.py \
-            prepared/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: validated-notification-fix
-          path: prepared
-          if-no-files-found: error
-          retention-days: 1
-      - name: Publish one clean final commit
+            tests/unit/test_warning_transitions.py
+          run_check ruff python -m ruff check \
+            daemon/src/stg/engine.py \
+            daemon/src/stg/i18n.py \
+            tests/unit/test_i18n.py \
+            tests/unit/test_warning_transitions.py
+          run_check diff bash -lc 'git diff --check'
+
+          set +e
+          PYTHONPATH=daemon/src python -m mypy daemon/src/stg \
+            > /tmp/notification-validation/mypy.log 2>&1
+          mypy_status=$?
+          set -e
+          if grep -Eq '^daemon/src/stg/(engine|i18n)\.py:' /tmp/notification-validation/mypy.log; then
+            record mypy_modified_modules 1
+          else
+            record mypy_modified_modules 0
+          fi
+          printf 'mypy_repository_baseline=%s\n' "$mypy_status" >> "$summary"
+
+          run_check tests ./scripts/test.sh --coverage
+          run_check build ./scripts/build.sh
+          rm -rf .mypy_cache .pytest_cache
+          run_check integrity python tools/lint_repo.py
+          run_check smoke ./scripts/smoke-test.sh
+          run_check package ./scripts/package.sh --skip-tests
+
+          printf 'overall=%s\n' "$ok" >> "$summary"
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+      - name: Publish one clean validated commit
+        if: steps.validate.outputs.ok == 'true'
         run: |
           mkdir -p /tmp/final-notification-fix
           cp --parents \
@@ -175,6 +196,27 @@ jobs:
             tests/unit/test_warning_transitions.py
           git commit -m "fix: make warning notifications threshold-based"
           git push --force origin HEAD:agent/fix-notification-thresholds
-          if [[ "$GITHUB_HEAD_REF" == "agent/validate-notification-fix" ]]; then
-            git push origin --delete "$GITHUB_HEAD_REF"
-          fi
+          git push origin --delete agent/validate-notification-fix
+      - name: Publish failure diagnostics
+        if: steps.validate.outputs.ok != 'true'
+        run: |
+          result=/tmp/notification-validation/result.txt
+          cp /tmp/notification-validation/summary.txt "$result"
+          for exit_file in /tmp/notification-validation/*.log; do
+            name=$(basename "$exit_file")
+            printf '\n===== %s (last 80 lines) =====\n' "$name" >> "$result"
+            tail -n 80 "$exit_file" >> "$result"
+          done
+          cp "$result" /tmp/notification-validation-result.txt
+
+          git fetch origin agent/validate-notification-fix
+          git reset --hard origin/agent/validate-notification-fix
+          git clean -fdx
+          mkdir -p .github
+          cp /tmp/notification-validation-result.txt .github/notification-validation-result.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/notification-validation-result.txt
+          git commit -m "chore: record notification validation failure"
+          git push origin HEAD:agent/validate-notification-fix
+          exit 1
