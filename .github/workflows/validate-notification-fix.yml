@@ -1,4 +1,4 @@
-name: CI
+name: Validate final notification fix
 
 on:
   pull_request:
@@ -6,17 +6,14 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  validate-and-finalize:
+  validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: agent/fix-notification-thresholds
-          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -78,10 +75,7 @@ jobs:
         self.clock.advance(1)
         emitted = warnings(self.engine.tick())
 
-        self.assertEqual(
-            [event.payload["threshold_seconds"] for event in emitted],
-            [15 * 60],
-        )
+        self.assertEqual([event.payload["threshold_seconds"] for event in emitted], [15 * 60])
         self.assertEqual(warnings(self.engine.tick()), [])
 
 '''
@@ -151,27 +145,3 @@ jobs:
           path: prepared
           if-no-files-found: error
           retention-days: 1
-      - name: Publish one clean final commit
-        run: |
-          mkdir -p /tmp/final-notification-fix
-          cp --parents \
-            CHANGELOG.md \
-            daemon/src/stg/engine.py \
-            daemon/src/stg/i18n.py \
-            tests/unit/test_i18n.py \
-            tests/unit/test_warning_transitions.py \
-            /tmp/final-notification-fix/
-          git fetch origin main
-          git reset --hard origin/main
-          git clean -fdx
-          cp -a /tmp/final-notification-fix/. .
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            CHANGELOG.md \
-            daemon/src/stg/engine.py \
-            daemon/src/stg/i18n.py \
-            tests/unit/test_i18n.py \
-            tests/unit/test_warning_transitions.py
-          git commit -m "fix: make warning notifications threshold-based"
-          git push --force origin HEAD:agent/fix-notification-thresholds
