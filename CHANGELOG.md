@@ -4,6 +4,10 @@ All notable changes use [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+- Emit timer and daily warnings only when their remaining time crosses a configured threshold.
+- Identify the warning scope in notification titles and avoid stale higher-threshold notices after adjustments or restarts.
+
 ### Planned
 - Validation and compatibility fixes from a physical Steam Deck running the stable SteamOS channel.
 - Optional PIN policy after the local threat model has been reviewed.

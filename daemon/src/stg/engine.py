@@ -91,27 +91,32 @@ class GuardianEngine:
 
     def update_config(self, config: dict[str, Any]) -> list[DomainEvent]:
         events = self.tick()
+        now = self.clock.now_utc()
+        previous_remaining = self._warning_snapshot(now)
         self.config = copy.deepcopy(config)
         self._usage_bucket_timezone = resolve_timezone(self.config["daily_limits"]["timezone"])
-        now = self.clock.now_utc()
         new_day_key = self._day_key(now)
         if new_day_key != self.day_key:
             events.extend(self._roll_day(now, new_day_key))
+        current_remaining = self._warning_snapshot(now)
+        for (scope, scope_key), remaining in current_remaining.items():
+            previous = previous_remaining.get((scope, scope_key))
+            if previous is not None and remaining > previous:
+                self.storage.clear_notification_scope(scope, scope_key)
+        events.extend(self._warning_events(now, previous_remaining))
         events.extend(self._refresh_restriction(now, emit=True))
         events.append(self._event("config.updated", {"schema_version": config["schema_version"]}))
         return events
 
     def tick(self) -> list[DomainEvent]:
         now = self.clock.now_utc()
+        previous_remaining = self._warning_snapshot(now)
         mono = self.clock.monotonic()
         mono_delta = max(0.0, mono - self._last_tick_mono)
         wall_delta = (now - self._last_tick_wall).total_seconds()
         discrepancy = wall_delta - mono_delta
         heatmap_attribution_is_reliable = (
-            not self.suspended
-            and mono_delta > 0
-            and wall_delta > 0
-            and abs(discrepancy) <= 5
+            not self.suspended and mono_delta > 0 and wall_delta > 0 and abs(discrepancy) <= 5
         )
         events: list[DomainEvent] = []
 
@@ -198,12 +203,15 @@ class GuardianEngine:
             self.storage.checkpoint_session(self.session_id, self.session_duration, now)
             self._flush_usage_buckets()
             self._last_checkpoint_mono = mono
-        if self.timer.state == TimerState.RUNNING and mono - self._last_timer_persist_mono >= checkpoint_seconds:
+        if (
+            self.timer.state == TimerState.RUNNING
+            and mono - self._last_timer_persist_mono >= checkpoint_seconds
+        ):
             self.timer.updated_at = utc_iso(now)
             self.storage.save_timer(self.timer)
             self._last_timer_persist_mono = mono
 
-        events.extend(self._warning_events(now))
+        events.extend(self._warning_events(now, previous_remaining))
         events.extend(self._refresh_restriction(now, emit=True))
         self._last_tick_mono = mono
         self._last_tick_wall = now
@@ -343,19 +351,25 @@ class GuardianEngine:
             raise DomainError("timer adjustment must be between -24h and +24h")
         if seconds == 0:
             raise DomainError("timer adjustment must not be zero")
-        self.timer.remaining_seconds = max(0.0, min(24 * 3600, self.timer.remaining_seconds + seconds))
+        now = self.clock.now_utc()
+        previous_remaining = self._warning_snapshot(now)
+        self.timer.remaining_seconds = max(
+            0.0,
+            min(24 * 3600, self.timer.remaining_seconds + seconds),
+        )
         if self.timer.remaining_seconds == 0:
             self.timer.state = TimerState.EXPIRED
         elif self.timer.state == TimerState.EXPIRED:
             self.timer.state = TimerState.PAUSED
-        self.timer.updated_at = utc_iso(self.clock.now_utc())
+        self.timer.updated_at = utc_iso(now)
         self.storage.save_timer(self.timer)
         if seconds > 0 and self.timer.generation:
             self.storage.clear_notification_scope("timer", self.timer.generation)
         events.append(
             self._record_event("timer.adjusted", {"seconds": seconds, "timer": self.timer.to_dict()})
         )
-        events.extend(self._refresh_restriction(self.clock.now_utc(), emit=True))
+        events.extend(self._warning_events(now, previous_remaining))
+        events.extend(self._refresh_restriction(now, emit=True))
         return events
 
     def grant_daily_time(self, seconds: int, reason: str) -> list[DomainEvent]:
@@ -364,7 +378,9 @@ class GuardianEngine:
             raise DomainError("an adjustment reason is required")
         if seconds == 0:
             raise DomainError("daily adjustment must not be zero")
-        self.storage.grant_adjustment(self.day_key, seconds, reason.strip(), self.clock.now_utc())
+        now = self.clock.now_utc()
+        previous_remaining = self._warning_snapshot(now)
+        self.storage.grant_adjustment(self.day_key, seconds, reason.strip(), now)
         if seconds > 0:
             self.storage.clear_notification_scope("daily", self.day_key)
         events.append(
@@ -373,7 +389,8 @@ class GuardianEngine:
                 {"day_key": self.day_key, "seconds": seconds, "reason": reason.strip()},
             )
         )
-        events.extend(self._refresh_restriction(self.clock.now_utc(), emit=True))
+        events.extend(self._warning_events(now, previous_remaining))
+        events.extend(self._refresh_restriction(now, emit=True))
         return events
 
     def shutdown(self, reason: str = "service_shutdown") -> list[DomainEvent]:
@@ -406,8 +423,7 @@ class GuardianEngine:
                 self.config["daily_limits"]["timezone"],
             ),
             "within_allowed_period": (
-                not self.config["daily_limits"]["enabled"]
-                or within_allowed_period(self.config, now)
+                not self.config["daily_limits"]["enabled"] or within_allowed_period(self.config, now)
             ),
             "game": self.current_game.to_dict() if self.current_game else None,
             "timer": self.timer.to_dict(),
@@ -424,17 +440,51 @@ class GuardianEngine:
             "suspended": self.suspended,
         }
 
-    def _warning_events(self, now: datetime) -> list[DomainEvent]:
+    def _warning_snapshot(self, now: datetime) -> dict[tuple[str, str], float]:
+        snapshot: dict[tuple[str, str], float] = {}
+        daily_limit = self._effective_daily_limit(now)
+        if daily_limit is not None:
+            snapshot[("daily", self.day_key)] = max(0.0, daily_limit - self.played_today)
+        if (
+            self.timer.state in {TimerState.RUNNING, TimerState.PAUSED, TimerState.EXPIRED}
+            and self.timer.generation
+        ):
+            snapshot[("timer", self.timer.generation)] = max(0.0, self.timer.remaining_seconds)
+        return snapshot
+
+    def _warning_events(
+        self,
+        now: datetime,
+        previous_remaining: dict[tuple[str, str], float],
+    ) -> list[DomainEvent]:
         events: list[DomainEvent] = []
         thresholds = [minutes * 60 for minutes in self.config["warnings"]["threshold_minutes"]]
-        daily_limit = self._effective_daily_limit(now)
-        daily_remaining = None if daily_limit is None else max(0, int(daily_limit - self.played_today))
+        if self.timer.generation:
+            timer_key = ("timer", self.timer.generation)
+            timer_remaining = self._warning_snapshot(now).get(timer_key)
+            if timer_remaining is not None:
+                events.extend(
+                    self._threshold_events(
+                        "timer",
+                        self.timer.generation,
+                        previous_remaining.get(timer_key),
+                        timer_remaining,
+                        thresholds,
+                        now,
+                    )
+                )
+        daily_key = ("daily", self.day_key)
+        daily_remaining = self._warning_snapshot(now).get(daily_key)
         if daily_remaining is not None:
-            events.extend(self._threshold_events("daily", self.day_key, daily_remaining, thresholds, now))
-        if self.timer.state in {TimerState.RUNNING, TimerState.PAUSED, TimerState.EXPIRED} and self.timer.generation:
-            timer_remaining = max(0, int(self.timer.remaining_seconds))
             events.extend(
-                self._threshold_events("timer", self.timer.generation, timer_remaining, thresholds, now)
+                self._threshold_events(
+                    "daily",
+                    self.day_key,
+                    previous_remaining.get(daily_key),
+                    daily_remaining,
+                    thresholds,
+                    now,
+                )
             )
         return events
 
@@ -442,48 +492,57 @@ class GuardianEngine:
         self,
         scope: str,
         scope_key: str,
-        remaining: int,
+        previous_remaining: float | None,
+        remaining: float,
         thresholds: list[int],
         now: datetime,
     ) -> list[DomainEvent]:
-        due = [threshold for threshold in thresholds if 0 < remaining <= threshold]
-        if remaining == 0 and self.config["warnings"]["notify_at_exhaustion"]:
-            due.append(0)
-        events: list[DomainEvent] = []
-        # Mark all crossed thresholds, but emit only the smallest currently due to avoid a burst after restart.
-        newly_marked: list[int] = []
-        for threshold in due:
-            if self.storage.mark_notification(scope, scope_key, threshold, now):
-                newly_marked.append(threshold)
-        if newly_marked:
-            threshold = min(newly_marked)
-            selected_language = language(self.config.get("language"))
-            if threshold == 0:
-                title = tr(selected_language, "warning_exhausted_title")
-                body = tr(selected_language, f"warning_exhausted_{scope}")
-                urgency = "critical"
-            else:
-                minutes = max(1, threshold // 60)
-                title = tr(
-                    selected_language,
-                    "warning_remaining_title",
-                    minutes=minutes,
-                    unit=tr(selected_language, "minute_one" if minutes == 1 else "minute_many"),
-                )
-                body = tr(selected_language, f"warning_remaining_{scope}")
-                urgency = "normal" if minutes > 5 else "critical"
-            payload = {
-                "scope": scope,
-                "scope_key": scope_key,
-                "remaining_seconds": remaining,
-                "threshold_seconds": threshold,
-                "title": title,
-                "body": body,
-                "urgency": urgency,
-                "persistent": threshold == 0,
-            }
-            events.append(self._record_event("notification.warning", payload, severity="warning"))
-        return events
+        if previous_remaining is None:
+            return []
+        due_thresholds = list(thresholds)
+        if self.config["warnings"]["notify_at_exhaustion"]:
+            due_thresholds.append(0)
+        crossed = [threshold for threshold in due_thresholds if remaining <= threshold < previous_remaining]
+        newly_marked = [
+            threshold
+            for threshold in crossed
+            if self.storage.mark_notification(scope, scope_key, threshold, now)
+        ]
+        if not newly_marked:
+            return []
+
+        # A delayed tick may cross several thresholds. Mark every one but show only the
+        # closest warning to the current value, avoiding a burst of obsolete messages.
+        threshold = min(newly_marked)
+        selected_language = language(self.config.get("language"))
+        scope_key_name = "daily_limit" if scope == "daily" else "timer"
+        scope_title = tr(selected_language, scope_key_name)
+        scope_title = scope_title[:1].upper() + scope_title[1:]
+        if threshold == 0:
+            message = tr(selected_language, "warning_exhausted_title")
+            body = tr(selected_language, f"warning_exhausted_{scope}")
+            urgency = "critical"
+        else:
+            minutes = max(1, threshold // 60)
+            message = tr(
+                selected_language,
+                "warning_remaining_title_one" if minutes == 1 else "warning_remaining_title_many",
+                minutes=minutes,
+                unit=tr(selected_language, "minute_one" if minutes == 1 else "minute_many"),
+            )
+            body = tr(selected_language, f"warning_remaining_{scope}")
+            urgency = "normal" if minutes > 5 else "critical"
+        payload = {
+            "scope": scope,
+            "scope_key": scope_key,
+            "remaining_seconds": max(0, int(remaining)),
+            "threshold_seconds": threshold,
+            "title": f"{scope_title}: {message}",
+            "body": body,
+            "urgency": urgency,
+            "persistent": threshold == 0,
+        }
+        return [self._record_event("notification.warning", payload, severity="warning")]
 
     def _refresh_restriction(self, now: datetime, *, emit: bool) -> list[DomainEvent]:
         reason = RestrictionReason.NONE
@@ -621,8 +680,7 @@ class GuardianEngine:
                 candidates.append(candidate)
         if self.timer.state == TimerState.RUNNING and self.timer.generation:
             timer_counts = (
-                not self.config["timer"]["count_only_while_playing"]
-                or self.current_game is not None
+                not self.config["timer"]["count_only_while_playing"] or self.current_game is not None
             )
             if timer_counts:
                 candidate = self._warning_candidate(
@@ -636,14 +694,14 @@ class GuardianEngine:
             return None
         return min(candidates, key=lambda item: (item["play_seconds_until"], item["threshold_seconds"]))
 
-    def _warning_candidate(
-        self, scope: str, scope_key: str, remaining: int
-    ) -> dict[str, Any] | None:
+    def _warning_candidate(self, scope: str, scope_key: str, remaining: int) -> dict[str, Any] | None:
         thresholds = [minutes * 60 for minutes in self.config["warnings"]["threshold_minutes"]]
         if self.config["warnings"]["notify_at_exhaustion"]:
             thresholds.append(0)
         marked = self.storage.notification_thresholds(scope, scope_key)
-        candidates = [threshold for threshold in thresholds if threshold not in marked and threshold <= remaining]
+        candidates = [
+            threshold for threshold in thresholds if threshold not in marked and threshold <= remaining
+        ]
         if not candidates:
             return None
         threshold = max(candidates)
@@ -670,7 +728,9 @@ class GuardianEngine:
             self.played_today += seconds
             self.session_duration += seconds
             if record_usage_bucket and interval_start and interval_end:
-                self._queue_usage_buckets(self.current_game, self.day_key, interval_start, interval_end, seconds)
+                self._queue_usage_buckets(
+                    self.current_game, self.day_key, interval_start, interval_end, seconds
+                )
 
     def _queue_usage_buckets(
         self,
@@ -695,9 +755,7 @@ class GuardianEngine:
         end = interval_end.astimezone(UTC)
         remaining = float(seconds)
         app_key = (
-            f"app:{game.app_id}"
-            if game.app_id and game.app_id != "0"
-            else f"name:{game.name.casefold()}"
+            f"app:{game.app_id}" if game.app_id and game.app_id != "0" else f"name:{game.name.casefold()}"
         )
         while cursor < end and remaining > 0:
             boundary = self._next_usage_bucket_boundary(cursor)
@@ -755,8 +813,13 @@ class GuardianEngine:
                 "app_name": app_name,
                 "seconds": seconds,
             }
-            for (day_key, bucket_index, app_key, app_id, app_name), seconds
-            in self._pending_usage_buckets.items()
+            for (
+                day_key,
+                bucket_index,
+                app_key,
+                app_id,
+                app_name,
+            ), seconds in self._pending_usage_buckets.items()
         ]
         self.storage.add_usage_buckets(entries)
         self._pending_usage_buckets.clear()

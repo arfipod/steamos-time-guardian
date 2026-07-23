@@ -37,6 +37,8 @@ _TEXT: dict[Language, dict[str, str]] = {
         "warning_exhausted_daily": "The configured daily allowance has been used.",
         "warning_exhausted_timer": "The configured timer allowance has been used.",
         "warning_remaining_title": "{minutes} {unit} remaining",
+        "warning_remaining_title_one": "{minutes} {unit} remaining",
+        "warning_remaining_title_many": "{minutes} {unit} remaining",
         "minute_one": "minute",
         "minute_many": "minutes",
         "warning_remaining_daily": "Daily allowance is nearing its limit.",
@@ -150,6 +152,8 @@ _TEXT: dict[Language, dict[str, str]] = {
         "warning_exhausted_daily": "Se ha agotado el tiempo diario configurado.",
         "warning_exhausted_timer": "Se ha agotado el tiempo del temporizador configurado.",
         "warning_remaining_title": "Queda {minutes} {unit}",
+        "warning_remaining_title_one": "Queda {minutes} {unit}",
+        "warning_remaining_title_many": "Quedan {minutes} {unit}",
         "minute_one": "minuto",
         "minute_many": "minutos",
         "warning_remaining_daily": "El tiempo diario está cerca de su límite.",
@@ -259,7 +263,11 @@ def format_duration(seconds: int | float | None, selected: str | None = "en") ->
     hours, remainder = divmod(value, 3600)
     minutes, secs = divmod(remainder, 60)
     minute_unit = "min" if language(selected) == "es" else "m"
-    return f"{hours:d}h {minutes:02d}{minute_unit} {secs:02d}s" if hours else f"{minutes:d}{minute_unit} {secs:02d}s"
+    return (
+        f"{hours:d}h {minutes:02d}{minute_unit} {secs:02d}s"
+        if hours
+        else f"{minutes:d}{minute_unit} {secs:02d}s"
+    )
 
 
 def display_timer_state(value: object, selected: str | None) -> str:

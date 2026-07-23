@@ -32,9 +32,11 @@ class LocalizationTests(unittest.TestCase):
         )
         fixture = EngineFixture(config=config)
         try:
-            events = fixture.engine.set_game(GameIdentity("100", "Juego", "simulation"))
+            fixture.engine.set_game(GameIdentity("100", "Juego", "simulation"))
+            fixture.clock.advance(1)
+            events = fixture.engine.tick()
             payload = next(event.payload for event in events if event.kind == "notification.warning")
-            self.assertEqual(payload["title"], "Queda 1 minuto")
+            self.assertEqual(payload["title"], "Límite diario: Queda 1 minuto")
             self.assertEqual(payload["body"], "El tiempo diario está cerca de su límite.")
         finally:
             fixture.close()
