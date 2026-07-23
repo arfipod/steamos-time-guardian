@@ -1,11 +1,9 @@
 name: Validate notification fix
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/fix-notification-thresholds
-    paths:
-      - .github/workflows/validate-notification-fix.yml
+      - main
 
 permissions:
   contents: read
