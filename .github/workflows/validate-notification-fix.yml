@@ -1,4 +1,4 @@
-name: Validate notification fix
+name: Diagnose final notification fix
 
 on:
   pull_request:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  diagnose:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -26,36 +26,37 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --no-build-isolation --editable '.[dev]'
           npm install --global typescript@5.8.3
-      - name: Normalize updated localization test
-        run: python -m ruff format tests/unit/test_i18n.py
-      - name: Compile and check changed-file formatting
+      - name: Normalize and validate changed files
         run: |
+          python -m ruff format tests/unit/test_i18n.py
           python -m compileall -q daemon/src tests
           python -m ruff format --check daemon/src/stg/engine.py daemon/src/stg/i18n.py tests/unit/test_i18n.py tests/unit/test_warning_transitions.py
-      - name: Ruff notification changes
-        run: |
           python -m ruff check tests/unit/test_i18n.py tests/unit/test_warning_transitions.py
           python -m ruff check --ignore RUF001,RUF046 daemon/src/stg/engine.py daemon/src/stg/i18n.py
-      - name: Mypy daemon baseline
-        continue-on-error: true
-        run: PYTHONPATH=daemon/src python -m mypy daemon/src/stg
-      - name: Unit and integration tests with coverage
-        run: ./scripts/test.sh --coverage
-      - name: Build
-        run: ./scripts/build.sh
-      - name: Repository integrity after generated frontend
-        run: python tools/lint_repo.py
-      - name: Simulation smoke test
-        run: ./scripts/smoke-test.sh
-      - name: Package and verify archives
-        run: ./scripts/package.sh --skip-tests
-      - name: Prepare formatted test artifact
+      - name: Capture complete final validation
+        shell: bash
         run: |
-          mkdir -p prepared/tests/unit
+          mkdir -p diagnostics prepared/tests/unit
+          set +e
+          PYTHONPATH=daemon/src python -m mypy daemon/src/stg > diagnostics/mypy.log 2>&1
+          printf '%s\n' "$?" > diagnostics/mypy.exit
+          ./scripts/test.sh --coverage > diagnostics/tests.log 2>&1
+          printf '%s\n' "$?" > diagnostics/tests.exit
+          ./scripts/build.sh > diagnostics/build.log 2>&1
+          printf '%s\n' "$?" > diagnostics/build.exit
+          python tools/lint_repo.py > diagnostics/integrity.log 2>&1
+          printf '%s\n' "$?" > diagnostics/integrity.exit
+          ./scripts/smoke-test.sh > diagnostics/smoke.log 2>&1
+          printf '%s\n' "$?" > diagnostics/smoke.exit
+          ./scripts/package.sh --skip-tests > diagnostics/package.log 2>&1
+          printf '%s\n' "$?" > diagnostics/package.exit
           cp tests/unit/test_i18n.py prepared/tests/unit/test_i18n.py
+          exit 0
       - uses: actions/upload-artifact@v4
         with:
-          name: formatted-test-i18n
-          path: prepared
+          name: final-notification-diagnostics
+          path: |
+            diagnostics
+            prepared
           if-no-files-found: error
           retention-days: 1
